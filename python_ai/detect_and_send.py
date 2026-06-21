@@ -228,7 +228,7 @@ def run_video_mode(model):
 # CHẾ ĐỘ 2: WEBCAM THỰC (kết hợp từ AIMOBILE)
 # ═══════════════════════════════════════════════════════════════
 def run_webcam_mode(model, gps_serial_port=None, gps_bridge_port=8090,
-                     enable_gps_serial=True, enable_gps_bridge=True, device_id=DEVICE_ID):
+                     enable_gps_serial=True, enable_gps_bridge=True, enable_gps_os=True, device_id=DEVICE_ID):
     print("\n🎥 CHẾ ĐỘ WEBCAM — Nhấn 'q' để thoát\n")
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -240,6 +240,7 @@ def run_webcam_mode(model, gps_serial_port=None, gps_bridge_port=8090,
         bridge_port=gps_bridge_port,
         enable_serial=enable_gps_serial,
         enable_bridge=enable_gps_bridge,
+        enable_os_location=enable_gps_os,
     )
     gps_provider.start()
 
@@ -346,6 +347,8 @@ def main():
                          help="Cổng chạy GPS Bridge cho điện thoại qua HTTPS (mặc định 8090)")
     parser.add_argument("--no-gps-serial", action="store_true", help="Tắt nguồn GPS Serial/USB rời")
     parser.add_argument("--no-gps-bridge", action="store_true", help="Tắt GPS Bridge điện thoại (HTTPS nội bộ)")
+    parser.add_argument("--no-gps-os", action="store_true",
+                         help="Tắt định vị của chính hệ điều hành (Windows Location Service / macOS / Termux)")
     parser.add_argument("--api-url", default=None,
                          help=f"URL API Dashboard để gửi dữ liệu (mặc định: {DASHBOARD_API})")
     args = parser.parse_args()
@@ -384,6 +387,7 @@ def main():
             gps_bridge_port=args.gps_bridge_port,
             enable_gps_serial=not args.no_gps_serial,
             enable_gps_bridge=not args.no_gps_bridge,
+            enable_gps_os=not args.no_gps_os,
             device_id=args.device_id,
         )
     else:
