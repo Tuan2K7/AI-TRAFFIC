@@ -287,6 +287,8 @@ def fetch_ip_location():
 
 
 def _get_local_ip() -> str:
+    """Cách cũ — chỉ trả 1 IP 'đoán' qua route ra Internet. Giữ lại để tương thích,
+    nhưng nên dùng _list_candidate_ips() để in đầy đủ lựa chọn cho người dùng tự chọn."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
@@ -295,6 +297,35 @@ def _get_local_ip() -> str:
         return "127.0.0.1"
     finally:
         s.close()
+
+
+def _list_candidate_ips() -> list[str]:
+    """Liệt kê TẤT CẢ địa chỉ IPv4 LAN khả dụng (máy có thể có nhiều card mạng:
+    WiFi, Ethernet, VPN ảo...). Loại bỏ loopback (127.x) vì điện thoại không bao
+    giờ truy cập được địa chỉ đó."""
+    candidates: set[str] = set()
+
+    # Cách 1: route ra ngoài (không thực sự gửi packet, chỉ hỏi bảng định tuyến)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if not ip.startswith("127."):
+            candidates.add(ip)
+    except Exception:
+        pass
+
+    # Cách 2: liệt kê toàn bộ IP gắn với hostname máy (bắt được cả khi không có Internet)
+    try:
+        hostname = socket.gethostname()
+        for ip in socket.gethostbyname_ex(hostname)[2]:
+            if not ip.startswith("127."):
+                candidates.add(ip)
+    except Exception:
+        pass
+
+    return sorted(candidates)
 
 
 # ───────────────────────── Provider tổng hợp ─────────────────────────
@@ -322,11 +353,24 @@ class RealGPSProvider:
 
         bridge_ok = self._bridge.start() if self._bridge else False
         if bridge_ok:
-            ip = _get_local_ip()
-            print(f"  🌐 GPS Bridge điện thoại đã chạy tại: https://{ip}:{self._bridge_port}")
-            print("     1) Mở link trên TRÌNH DUYỆT ĐIỆN THOẠI (cùng mạng WiFi với máy này)")
+            ips = _list_candidate_ips()
+            if not ips:
+                print("  ❌ KHÔNG tìm thấy địa chỉ IP mạng LAN nào — điện thoại sẽ KHÔNG vào được link!")
+                print("     → Kiểm tra máy này đã kết nối WiFi/LAN chưa, hoặc tự tra IP bằng:")
+                print("       Windows: ipconfig   |   Mac/Linux: ifconfig hoặc ip addr")
+                print(f"       Rồi tự mở: https://<IP-của-bạn>:{self._bridge_port} trên điện thoại")
+            elif len(ips) == 1:
+                print(f"  🌐 GPS Bridge điện thoại đã chạy tại: https://{ips[0]}:{self._bridge_port}")
+            else:
+                print(f"  🌐 GPS Bridge điện thoại đã chạy ở cổng {self._bridge_port}. Máy này có nhiều IP mạng,")
+                print("     thử LẦN LƯỢT các link sau trên điện thoại (cùng WiFi) cho đến khi vào được:")
+                for ip in ips:
+                    print(f"       → https://{ip}:{self._bridge_port}")
+            print("     1) Điện thoại PHẢI cùng WiFi với máy này (không dùng 4G/5G, không Guest WiFi)")
             print("     2) Trình duyệt báo 'Không an toàn' do chứng chỉ tự ký → chọn 'Chi tiết/Advanced' → 'Tiếp tục/Proceed'")
             print("     3) Cho phép quyền truy cập Vị trí khi được hỏi — vị trí thật sẽ tự gửi về hệ thống")
+            print("     4) Nếu vẫn không vào được: tắt Firewall tạm để test, hoặc thử mở chính link này trên")
+            print("        trình duyệt của MÁY NÀY trước (không phải điện thoại) để biết lỗi do mạng hay do máy")
 
         def _bg_ip_lookup():
             self._ip_fallback = fetch_ip_location()
