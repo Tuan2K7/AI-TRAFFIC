@@ -237,38 +237,6 @@ gửi kết quả lên trung tâm.
 
 ---
 
-## ⚠️ Hạn chế đã biết (nói thật để bạn không bất ngờ khi vận hành)
-
-- **Tìm kiếm vị trí** dùng Nominatim (OpenStreetMap) miễn phí — giới hạn ~1 request/giây,
-  không phù hợp traffic lớn. Nếu cần ổn định cao hơn, đổi sang Mapbox/Google Geocoding (có phí).
-- **Lưu trữ sự kiện** là in-memory (xem mục Deploy) — mất khi restart server.
-- **`@meshsdk` Transaction class** mà dự án dùng được MeshSDK đánh dấu *deprecated* (khuyến
-  nghị chuyển sang `MeshTxBuilder`) nhưng vẫn hoạt động bình thường ở bản SDK hiện tại; mình
-  giữ nguyên để không phá vỡ luồng ký ví đang chạy ổn — có thể nâng cấp sau nếu bạn muốn.
-- **Model YOLO hiện tại chỉ huấn luyện để nhận 1 loại lỗi (ổ gà)**. Dashboard đã hỗ trợ sẵn
-  4 loại (Ổ gà / Vết lún / Ngập nước / Nắp cống hỏng) để đúng giao diện mẫu, nhưng cần huấn
-  luyện lại model đa lớp (hoặc dùng nhiều model riêng) mới có dữ liệu thật cho 3 loại còn lại
-  ngoài chế độ demo.
-- Còn một số cảnh báo bảo mật (`npm audit`) ở các gói phụ thuộc gián tiếp bên trong SDK
-  Cardano (mức thấp/trung bình) — sửa triệt để sẽ cần hạ cấp `@meshsdk`, không khuyến nghị.
-
----
-
-## ✨ Có gì mới so với bản trước
-
-1. **Giao diện** làm lại theo mẫu: thanh tìm kiếm vị trí thật, bộ lọc 4 loại sự cố, 4 thẻ
-   thống kê (Tổng sự cố / Đồng thuận đám đông / Edge Node Active / Độ tin cậy TB mạng),
-   đổi tên tab thành "Live Feed" / "Sổ cái minh bạch (Ledger)".
-2. **Đồng thuận đám đông thật** — không phải nhãn trang trí: tính từ khoảng cách + thời gian
-   giữa các báo cáo của nhiều Edge Node độc lập (`src/lib/consensus.ts`).
-3. **GPS thật** thay cho toạ độ hardcode — 3 nguồn (Serial/điện thoại/IP) + log rõ khi nào
-   đang dùng GPS giả.
-4. **Bảo mật & ổn định:** nâng Next.js lên bản đã vá lỗ hổng CVE-2025-66478, thêm cấu hình
-   ESLint còn thiếu, thêm Blockfrost provider tuỳ chọn, đã build production thử thành công.
-5. Sửa thiếu `gpxpy` trong `requirements.txt` (bug cũ — code có import nhưng thiếu khai báo).
-
----
-
 ## 🌐 Links hữu ích
 - Cardano Preprod Explorer: https://preprod.cardanoscan.io
 - Cardano Preprod Faucet: https://docs.cardano.org/cardano-testnets/tools/faucet
