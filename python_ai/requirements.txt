@@ -4,3 +4,7 @@ requests>=2.31.0
 numpy>=1.24.0
 gpxpy>=1.6.0
 pyserial>=3.5
+# Định vị của chính máy đang chạy (chỉ cài trên đúng hệ điều hành tương ứng):
+winsdk>=1.0.0; sys_platform == 'win32'        # Windows Location Service
+# macOS: cần cài thêm thủ công (pip install pyobjc-framework-CoreLocation) nếu muốn dùng,
+# không khai báo cứng ở đây vì pyobjc khá nặng và chỉ cần cho người dùng Mac.
