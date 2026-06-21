@@ -4,12 +4,16 @@ Module GPS THẬT cho Edge Node — KHÔNG dùng toạ độ hardcode làm ngu�
 Thứ tự ưu tiên (nguồn nào sẵn sàng & "tươi" nhất thì dùng):
   1. GPS rời qua cổng Serial/USB/Bluetooth (chuẩn NMEA 0183) — chính xác nhất,
      dùng khi gắn máy thu GPS thật (vd. u-blox, GPS dongle) vào máy chạy script.
-  2. GPS điện thoại qua trình duyệt (HTTPS Bridge nội bộ, không cần app/cài đặt) —
-     mở 1 link trên điện thoại (cùng WiFi), trình duyệt tự gửi vị trí thật về.
-  3. GPS theo IP (ước lượng vị trí dựa trên mạng Internet) — không cần thiết bị
+  2. GPS của CHÍNH MÁY đang chạy script (Windows Location Service / macOS
+     CoreLocation / Linux GeoClue2 / Termux trên Android) — không cần thiết bị
+     hay điện thoại phụ nào khác, dùng luôn định vị có sẵn của hệ điều hành.
+  3. GPS điện thoại qua trình duyệt (HTTPS Bridge nội bộ) — mở 1 link trên
+     điện thoại (cùng WiFi), trình duyệt tự gửi vị trí thật về. Dự phòng khi
+     máy chạy script không có/không bật được định vị hệ điều hành.
+  4. GPS theo IP (ước lượng vị trí dựa trên mạng Internet) — không cần thiết bị
      gì cả, độ chính xác chỉ ở mức thành phố, dùng làm lưới an toàn cuối cùng.
-  4. Toạ độ mặc định (hardcode Hà Nội) — CHỈ dùng khi 3 nguồn trên đều thất bại,
-     và luôn được log rõ ràng để biết hệ thống đang chạy với GPS giả.
+  5. Toạ độ mặc định (hardcode Hà Nội) — CHỈ dùng khi tất cả nguồn trên đều
+     thất bại, và luôn được log rõ ràng để biết hệ thống đang chạy với GPS giả.
 
 Dùng:
     from modules.gps_provider import RealGPSProvider
@@ -23,8 +27,10 @@ Dùng:
 
 import json
 import os
+import platform
 import socket
 import ssl
+import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
@@ -38,13 +44,31 @@ try:
 except ImportError:
     _HAS_SERIAL = False
 
+# Windows Location Service (dùng WinRT qua package winsdk) — chỉ có trên Windows
+try:
+    import asyncio
+    from winsdk.windows.devices.geolocation import Geolocator, PositionAccuracy
+    _HAS_WINSDK = True
+except ImportError:
+    _HAS_WINSDK = False
+
+# macOS CoreLocation (qua pyobjc) — chỉ có trên macOS
+try:
+    import CoreLocation # type: ignore
+    from PyObjCTools import AppHelper # type: ignore # noqa: F401  (đảm bảo pyobjc-framework-Cocoa có sẵn)
+    _HAS_CORELOCATION = True
+except ImportError:
+    _HAS_CORELOCATION = False
+
 BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CERT_DIR    = os.path.join(BASE_DIR, "certs")
 CERT_FILE   = os.path.join(CERT_DIR, "gps_bridge_cert.pem")
 KEY_FILE    = os.path.join(CERT_DIR, "gps_bridge_key.pem")
 
-SERIAL_FRESH_S = 5     # GPS serial phải có fix trong 5s gần nhất mới được coi là "đang dùng"
-PHONE_FRESH_S  = 15    # GPS điện thoại — trình duyệt gửi thưa hơn (di chuyển/mạng), nới rộng hơn
+
+SERIAL_FRESH_S      = 5     # GPS serial phải có fix trong 5s gần nhất mới được coi là "đang dùng"
+OS_LOCATION_FRESH_S = 20    # Windows/macOS/Linux Location Service — poll thưa hơn (5-10s/lần)
+PHONE_FRESH_S       = 15    # GPS điện thoại — trình duyệt gửi thưa hơn (di chuyển/mạng), nới rộng hơn
 
 
 # ───────────────────────── NMEA parser (tự viết, không phụ thuộc thư viện ngoài) ─────────────────────────
@@ -93,7 +117,164 @@ def parse_nmea_sentence(line: str):
     return None
 
 
-# ───────────────────────── Nguồn 1: GPS rời qua Serial/USB ─────────────────────────
+# ───────────────────────── (Lớp dùng chung) GPS của chính máy đang chạy (OS Location Service — ưu tiên #2) ─────────────────────────
+def _is_termux() -> bool:
+    return os.path.exists("/data/data/com.termux") or "com.termux" in os.environ.get("PREFIX", "")
+
+
+class _WindowsLocationReader(Thread):
+    """Dùng Windows Location Service (WinRT qua winsdk) — định vị bằng WiFi xung quanh,
+    không cần chip GPS riêng. Cần: Settings > Privacy & Security > Location > bật
+    'Location services' VÀ bật quyền cho 'Desktop apps'."""
+
+    def __init__(self, shared_state: dict, lock: Lock, poll_interval: int = 8):
+        super().__init__(daemon=True)
+        self._state = shared_state
+        self._lock = lock
+        self._poll_interval = poll_interval
+        self._stop_flag = False
+
+    def run(self):
+        if not _HAS_WINSDK:
+            return
+        print("  📡 Đang dùng Windows Location Service để lấy GPS thật trên chính máy này...")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        geolocator = Geolocator()
+        try:
+            geolocator.desired_accuracy = PositionAccuracy.HIGH
+        except Exception:
+            pass
+
+        warned = False
+        while not self._stop_flag:
+            try:
+                pos = loop.run_until_complete(geolocator.get_geoposition_async())
+                coord = pos.coordinate
+                lat = coord.point.position.latitude
+                lon = coord.point.position.longitude
+                speed_kmh = (coord.speed or 0.0) * 3.6 if getattr(coord, "speed", None) else 0.0
+                with self._lock:
+                    self._state["os_location"] = {"lat": lat, "lon": lon, "speed_kmh": speed_kmh, "ts": time.time()}
+                warned = False
+            except Exception as e:
+                if not warned:
+                    print(f"  ⚠ Windows Location Service chưa lấy được vị trí: {e}")
+                    print("    → Vào Settings > Privacy & Security > Location:")
+                    print("       1) Bật 'Location services'")
+                    print("       2) Bật quyền truy cập vị trí cho 'Desktop apps'")
+                    warned = True
+            time.sleep(self._poll_interval)
+
+    def stop(self):
+        self._stop_flag = True
+
+
+class _MacLocationReader(Thread):
+    """Dùng macOS CoreLocation (qua pyobjc) — cần cấp quyền vị trí cho Terminal/Python
+    tại System Settings > Privacy & Security > Location Services."""
+
+    def __init__(self, shared_state: dict, lock: Lock, poll_interval: int = 8):
+        super().__init__(daemon=True)
+        self._state = shared_state
+        self._lock = lock
+        self._poll_interval = poll_interval
+        self._stop_flag = False
+        self._manager = None
+
+    def run(self):
+        if not _HAS_CORELOCATION:
+            return
+        print("  📡 Đang dùng macOS Location Services để lấy GPS thật trên chính máy này...")
+        self._manager = CoreLocation.CLLocationManager.alloc().init()
+        self._manager.startUpdatingLocation()
+        warned = False
+        while not self._stop_flag:
+            try:
+                loc = self._manager.location()
+                if loc is not None:
+                    coord = loc.coordinate()
+                    with self._lock:
+                        self._state["os_location"] = {
+                            "lat": coord.latitude, "lon": coord.longitude,
+                            "speed_kmh": max(loc.speed(), 0) * 3.6, "ts": time.time(),
+                        }
+                    warned = False
+                elif not warned:
+                    print("  ⚠ macOS chưa cấp quyền vị trí cho Terminal/Python.")
+                    print("    → System Settings > Privacy & Security > Location Services > bật cho Terminal")
+                    warned = True
+            except Exception as e:
+                if not warned:
+                    print(f"  ⚠ macOS Location Services lỗi: {e}")
+                    warned = True
+            time.sleep(self._poll_interval)
+
+    def stop(self):
+        self._stop_flag = True
+        if self._manager:
+            try:
+                self._manager.stopUpdatingLocation()
+            except Exception:
+                pass
+
+
+class _TermuxLocationReader(Thread):
+    """Khi chạy script TRỰC TIẾP trên điện thoại Android qua Termux — dùng app
+    Termux:API (cài thêm từ F-Droid/Play) để lấy GPS thật của chính điện thoại,
+    không cần laptop/bridge gì cả."""
+
+    def __init__(self, shared_state: dict, lock: Lock, poll_interval: int = 6):
+        super().__init__(daemon=True)
+        self._state = shared_state
+        self._lock = lock
+        self._poll_interval = poll_interval
+        self._stop_flag = False
+
+    def run(self):
+        print("  📡 Đang dùng Termux:API để lấy GPS thật của điện thoại (cần cài app Termux:API)...")
+        warned = False
+        while not self._stop_flag:
+            try:
+                out = subprocess.run(
+                    ["termux-location", "-p", "network", "-r", "once"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                data = json.loads(out.stdout)
+                with self._lock:
+                    self._state["os_location"] = {
+                        "lat": data["latitude"], "lon": data["longitude"],
+                        "speed_kmh": max(data.get("speed", 0) or 0, 0) * 3.6, "ts": time.time(),
+                    }
+                warned = False
+            except FileNotFoundError:
+                if not warned:
+                    print("  ⚠ Chưa có lệnh termux-location — cài: pkg install termux-api (và app Termux:API trên điện thoại)")
+                    warned = True
+                return  # không cần thử lại liên tục nếu thiếu hẳn lệnh
+            except Exception as e:
+                if not warned:
+                    print(f"  ⚠ Termux Location lỗi: {e}")
+                    warned = True
+            time.sleep(self._poll_interval)
+
+    def stop(self):
+        self._stop_flag = True
+
+
+def _make_os_location_reader(shared_state: dict, lock: Lock):
+    """Tự chọn đúng nguồn định vị theo hệ điều hành đang chạy script."""
+    system = platform.system()
+    if system == "Windows" and _HAS_WINSDK:
+        return _WindowsLocationReader(shared_state, lock)
+    if system == "Darwin" and _HAS_CORELOCATION:
+        return _MacLocationReader(shared_state, lock)
+    if system == "Linux" and _is_termux():
+        return _TermuxLocationReader(shared_state, lock)
+    return None
+
+
+# ───────────────────────── (Lớp dùng chung) GPS rời qua Serial/USB (NMEA — ưu tiên #1, chính xác nhất) ─────────────────────────
 class _SerialGPSReader(Thread):
     def __init__(self, shared_state: dict, lock: Lock, port: str | None = None, baudrate: int = 9600):
         super().__init__(daemon=True)
@@ -151,7 +332,7 @@ class _SerialGPSReader(Thread):
                 pass
 
 
-# ───────────────────────── Nguồn 2: GPS điện thoại qua HTTPS Bridge ─────────────────────────
+# ───────────────────────── (Lớp dùng chung) GPS điện thoại qua HTTPS Bridge (ưu tiên #3) ─────────────────────────
 _BRIDGE_HTML = """<!DOCTYPE html>
 <html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -270,7 +451,7 @@ class PhoneGPSBridge:
                 pass
 
 
-# ───────────────────────── Nguồn 3: GPS theo IP (dự phòng) ─────────────────────────
+# ───────────────────────── (Lớp dùng chung) GPS theo IP — dự phòng cuối (ưu tiên #4) ─────────────────────────
 def fetch_ip_location():
     """Một lệnh gọi duy nhất lúc khởi động — KHÔNG có giấy phép dùng để theo dõi liên tục."""
     try:
@@ -331,7 +512,7 @@ def _list_candidate_ips() -> list[str]:
 # ───────────────────────── Provider tổng hợp ─────────────────────────
 class RealGPSProvider:
     def __init__(self, serial_port: str | None = None, bridge_port: int = 8090,
-                 enable_serial: bool = True, enable_bridge: bool = True):
+                 enable_serial: bool = True, enable_bridge: bool = True, enable_os_location: bool = True):
         self._lock = Lock()
         self._state: dict = {}
         self._ip_fallback = None
@@ -340,6 +521,9 @@ class RealGPSProvider:
         self._serial_reader = (
             _SerialGPSReader(self._state, self._lock, port=serial_port)
             if enable_serial and _HAS_SERIAL else None
+        )
+        self._os_reader = (
+            _make_os_location_reader(self._state, self._lock) if enable_os_location else None
         )
         self._bridge = PhoneGPSBridge(self._state, self._lock, port=bridge_port) if enable_bridge else None
 
@@ -350,6 +534,13 @@ class RealGPSProvider:
             self._serial_reader.start()
         elif not _HAS_SERIAL:
             print("  ℹ Chưa cài pyserial (pip install pyserial) → bỏ qua nguồn GPS Serial/USB rời")
+
+        if self._os_reader:
+            self._os_reader.start()
+        else:
+            system = platform.system()
+            print(f"  ℹ Không có nguồn định vị hệ điều hành khả dụng cho {system} lúc này "
+                  "(thiếu thư viện hoặc không hỗ trợ) → dùng GPS điện thoại/IP thay thế")
 
         bridge_ok = self._bridge.start() if self._bridge else False
         if bridge_ok:
@@ -366,6 +557,7 @@ class RealGPSProvider:
                 print("     thử LẦN LƯỢT các link sau trên điện thoại (cùng WiFi) cho đến khi vào được:")
                 for ip in ips:
                     print(f"       → https://{ip}:{self._bridge_port}")
+            print("     (Chỉ cần dùng nếu Windows Location Service ở trên không lấy được vị trí)")
             print("     1) Điện thoại PHẢI cùng WiFi với máy này (không dùng 4G/5G, không Guest WiFi)")
             print("     2) Trình duyệt báo 'Không an toàn' do chứng chỉ tự ký → chọn 'Chi tiết/Advanced' → 'Tiếp tục/Proceed'")
             print("     3) Cho phép quyền truy cập Vị trí khi được hỏi — vị trí thật sẽ tự gửi về hệ thống")
@@ -385,11 +577,16 @@ class RealGPSProvider:
         now = time.time()
         with self._lock:
             serial_fix = self._state.get("serial")
+            os_fix = self._state.get("os_location")
             phone_fix = self._state.get("phone")
 
         if serial_fix and now - serial_fix["ts"] <= SERIAL_FRESH_S:
             return {"lat": serial_fix["lat"], "lng": serial_fix["lon"],
                     "speed_kmh": serial_fix.get("speed_kmh") or 0.0, "source": "gps-serial"}
+
+        if os_fix and now - os_fix["ts"] <= OS_LOCATION_FRESH_S:
+            return {"lat": os_fix["lat"], "lng": os_fix["lon"],
+                    "speed_kmh": os_fix.get("speed_kmh") or 0.0, "source": "gps-os-device"}
 
         if phone_fix and now - phone_fix["ts"] <= PHONE_FRESH_S:
             return {"lat": phone_fix["lat"], "lng": phone_fix["lon"],
@@ -404,5 +601,7 @@ class RealGPSProvider:
     def stop(self):
         if self._serial_reader:
             self._serial_reader.stop()
+        if self._os_reader:
+            self._os_reader.stop()
         if self._bridge:
             self._bridge.stop()
